@@ -1,3 +1,11 @@
+# Unreleased
+
+## Features
+
+- Add `Central::connected_peripherals()` to list currently connected BLE devices
+  already known to a central. Backends may override the default to include
+  connected devices available from the operating system.
+
 # 0.13.5 (2026-10-10)
 
 ## Bugfixes

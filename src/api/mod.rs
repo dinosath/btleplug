@@ -536,6 +536,22 @@ pub trait Central: Send + Sync + Clone {
     /// may contain peripherals that are no longer available.
     async fn peripherals(&self) -> Result<Vec<Self::Peripheral>>;
 
+    /// Returns the discovered peripherals that currently have an active connection.
+    ///
+    /// The default implementation filters [`Central::peripherals`]. Backends may override this
+    /// method to include connected peripherals known to the operating system even if they have
+    /// not yet been discovered by this `Central` instance. This reports BLE/GATT connections;
+    /// it does not enumerate Bluetooth Classic profiles such as HID.
+    async fn connected_peripherals(&self) -> Result<Vec<Self::Peripheral>> {
+        let mut connected = Vec::new();
+        for peripheral in self.peripherals().await? {
+            if peripheral.is_connected().await? {
+                connected.push(peripheral);
+            }
+        }
+        Ok(connected)
+    }
+
     /// Retrieves peripherals from the backend's connected-device or known-device source.
     ///
     /// Selectors are combined as a union: a peripheral is returned when its identifier matches
