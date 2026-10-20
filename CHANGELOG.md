@@ -2,6 +2,7 @@
 
 ## Features
 
+- Add an Android-only BLE HID-over-GATT peripheral for mouse and keyboard reports.
 - Add `Central::connected_peripherals()` to list currently connected BLE devices
   already known to a central. Backends may override the default to include
   connected devices available from the operating system.

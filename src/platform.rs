@@ -10,13 +10,18 @@ pub use crate::corebluetooth::{
     adapter::Adapter, manager::Manager, peripheral::Peripheral, peripheral::PeripheralId,
 };
 #[cfg(target_os = "android")]
+pub use crate::droidplug::hid::BleHidPeripheral;
+#[cfg(target_os = "android")]
 pub use crate::droidplug::{
-    adapter::Adapter, init, manager::Manager, peripheral::Peripheral, peripheral::PeripheralId,
+    adapter::Adapter, init, init_from_raw_env, manager::Manager, peripheral::Peripheral,
+    peripheral::PeripheralId,
 };
 #[cfg(target_os = "windows")]
 pub use crate::winrtble::{
     adapter::Adapter, manager::Manager, peripheral::Peripheral, peripheral::PeripheralId,
 };
+#[cfg(target_os = "android")]
+pub use jni;
 
 use crate::api::{self, Central};
 use static_assertions::assert_impl_all;

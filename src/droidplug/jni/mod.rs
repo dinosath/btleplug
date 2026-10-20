@@ -34,6 +34,11 @@ fn init_inner(env: &mut Env) -> crate::Result<()> {
             jni_str!("com.nonpolynomial.btleplug.android.impl.Adapter"),
             false,
         )?;
+        let _hid_peripheral_class = loader.load_class(
+            env,
+            jni_str!("com.nonpolynomial.btleplug.android.impl.BleHidPeripheral"),
+            false,
+        )?;
         // jni-macros 0.22.4 expands native_method! to AtomicBool::fetch_update, deprecated
         // since Rust 1.99 (jni-rs/jni-rs#846).
         #[allow(deprecated)]

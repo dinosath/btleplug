@@ -16,12 +16,25 @@ It grew out of several earlier abandoned libraries for various platforms
 ([rumble](https://github.com/mwylde/rumble), [blurmac](https://github.com/servo/devices), etc...),
 with the goal of building a fully cross platform library. If you're curious about how the library grew, [you can read more on that in this blog post](https://nonpolynomial.com/2023/10/30/how-to-beg-borrow-steal-your-way-to-a-cross-platform-bluetooth-le-library/).
 
-btleplug is meant to be _host/central mode only_. If you are interested in peripheral BTLE (i.e.
-acting like a Bluetooth LE device instead of connecting to one), check out
-[bluster](https://github.com/dfrankland/bluster/) or [ble-peripheral-rust](https://github.com/rohitsangwan01/ble-peripheral-rust/).
+btleplug's cross-platform API is for host/central mode. This OpenWASD fork also
+adds an Android-only `platform::BleHidPeripheral` for advertising a BLE HID
+mouse/keyboard over the HID-over-GATT Profile (HOGP). This peripheral API is
+not part of the cross-platform central traits; other platform backends still
+need their own GATT-server support.
 
 This library **DOES NOT SUPPORT BLUETOOTH 2/CLASSIC**. There are no plans to add BT2/Classic
 support.
+
+### Android BLE HID peripheral
+
+On Android, construct `platform::BleHidPeripheral` with the current application
+`Context` after initializing btleplug. The app must declare and obtain
+`BLUETOOTH_ADVERTISE` and `BLUETOOTH_CONNECT` runtime permissions on Android 12+
+and use a device whose Bluetooth adapter supports LE peripheral advertising.
+HID hosts pair with the phone through their normal Bluetooth settings. The
+peripheral exposes relative mouse reports (buttons, X/Y, wheel) and 8-byte
+keyboard reports. Report notifications begin after the host subscribes to the
+corresponding GATT report characteristic.
 
 ## Platform Status
 
