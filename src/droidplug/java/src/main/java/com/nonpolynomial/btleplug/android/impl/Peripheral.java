@@ -26,7 +26,7 @@ import io.github.gedgygedgy.rust.stream.QueueStream;
 import io.github.gedgygedgy.rust.future.SimpleFuture;
 import io.github.gedgygedgy.rust.stream.Stream;
 
-@SuppressWarnings("unused") // Native code uses this class.
+@SuppressWarnings({"unused", "deprecation"}) // JNI entry points and Android API 26 compatibility.
 class Peripheral {
     private static final String TAG = "Peripheral";
     private static final UUID CLIENT_CHARACTERISTIC_CONFIGURATION_DESCRIPTOR = new UUID(0x00002902_0000_1000L, 0x8000_00805f9b34fbL);

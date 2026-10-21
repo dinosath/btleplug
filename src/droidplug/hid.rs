@@ -118,7 +118,7 @@ impl BleHidPeripheral {
         jvm()?.attach_current_thread(|env| {
             let array = env.new_byte_array(report.len())?;
             let bytes: Vec<_> = report.into_iter().map(|byte| byte as i8).collect();
-            env.set_byte_array_region(&array, 0, &bytes)?;
+            array.set_region(env, 0, &bytes)?;
             Ok(env
                 .call_method(
                     self.internal.as_obj(),

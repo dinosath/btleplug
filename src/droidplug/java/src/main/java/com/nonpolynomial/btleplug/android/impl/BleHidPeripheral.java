@@ -32,7 +32,7 @@ import java.util.Set;
 import java.util.UUID;
 
 /** Minimal Bluetooth HID over GATT (HOGP) peripheral for mouse and keyboard input. */
-@SuppressWarnings("unused")
+@SuppressWarnings({"unused", "deprecation"}) // GATT compatibility APIs support the configured minimum Android version.
 public final class BleHidPeripheral {
     private static final String LOG_TAG = "OpenWASD-HID";
     private static final UUID HID_SERVICE = uuid(0x1812);

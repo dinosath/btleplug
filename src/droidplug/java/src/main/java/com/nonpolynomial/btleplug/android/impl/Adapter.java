@@ -14,7 +14,7 @@ import android.os.ParcelUuid;
 import java.util.ArrayList;
 import java.util.List;
 
-@SuppressWarnings("unused") // Native code uses this class.
+@SuppressWarnings({"unused", "deprecation"}) // JNI entry points and Android API 26 compatibility.
 class Adapter {
     private long handle;
     private final Callback callback = new Callback();
