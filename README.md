@@ -22,6 +22,12 @@ mouse/keyboard over the HID-over-GATT Profile (HOGP). This peripheral API is
 not part of the cross-platform central traits; other platform backends still
 need their own GATT-server support.
 
+The Android HOGP implementation is maintained with the crate under
+`src/droidplug/java/src/main/java/com/nonpolynomial/btleplug/android/impl/BleHidPeripheral.java`.
+Its Rust API and lifecycle wrapper live in `src/droidplug/hid.rs`. Applications
+that package helper classes separately must include this Java source in their
+Android DEX build.
+
 This library **DOES NOT SUPPORT BLUETOOTH 2/CLASSIC**. There are no plans to add BT2/Classic
 support.
 

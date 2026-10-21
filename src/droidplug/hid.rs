@@ -5,11 +5,11 @@
 //! for BLE central/client operations, and other platforms need separate GATT
 //! server backends before they can offer the same HID peripheral API.
 
-use super::jni::{jvm, objects::JString};
+use super::jni::jvm;
 use crate::Result;
 use jni::{
     Env, jni_sig, jni_str,
-    objects::{Global, JObject},
+    objects::{Global, JObject, JString},
 };
 use std::{fmt, sync::Arc};
 
@@ -42,7 +42,7 @@ impl BleHidPeripheral {
         let object = env.new_object(
             &class,
             jni_sig!("(Landroid/content/Context;Ljava/lang/String;)V"),
-            &[context.into(), name.into()],
+            &[(&context).into(), (&name).into()],
         )?;
         Ok(Self {
             internal: Arc::new(env.new_global_ref(&object)?),
@@ -124,7 +124,7 @@ impl BleHidPeripheral {
                     self.internal.as_obj(),
                     jni_str!("sendKeyboardReport"),
                     jni_sig!("([B)Z"),
-                    &[array.into()],
+                    &[(&array).into()],
                 )?
                 .z()?)
         })

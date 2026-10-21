@@ -27,7 +27,7 @@ pub unsafe fn init_from_raw_env(raw_env: *mut ::jni::sys::JNIEnv) -> crate::Resu
     // SAFETY: delegated to this function's caller.
     let mut unowned = unsafe { EnvUnowned::from_raw(raw_env) };
     match unowned.with_env(init).into_outcome() {
-        Outcome::Ok(result) => result,
+        Outcome::Ok(()) => Ok(()),
         Outcome::Err(error) => Err(error),
         Outcome::Panic(_) => Err(crate::Error::RuntimeError(
             "panic while initializing btleplug's Android JNI backend".into(),
