@@ -34,11 +34,45 @@ fn init_inner(env: &mut Env) -> crate::Result<()> {
             jni_str!("com.nonpolynomial.btleplug.android.impl.Adapter"),
             false,
         )?;
-        let _hid_peripheral_class = loader.load_class(
-            env,
-            jni_str!("com.nonpolynomial.btleplug.android.impl.BleHidPeripheral"),
-            false,
-        )?;
+        let version = loader.load_class(env, jni_str!("android.os.Build$VERSION"), false)?;
+        if env
+            .get_static_field(&version, jni_str!("SDK_INT"), ::jni::jni_sig!("I"))?
+            .i()?
+            >= 28
+        {
+            let hid_peripheral_class = loader.load_class(
+                env,
+                jni_str!("com.nonpolynomial.btleplug.android.impl.BleHidPeripheral"),
+                false,
+            )?;
+            #[allow(deprecated)]
+            let load_hid = native_method! {
+                static = true,
+                name = "loadSubscriptions",
+                sig = (root: JString, address: JString, bonded: jboolean) -> jint,
+                fn = super::hid::load_subscriptions,
+            };
+            #[allow(deprecated)]
+            let save_hid = native_method! {
+                static = true,
+                name = "saveSubscriptions",
+                sig = (root: JString, address: JString, bonded: jboolean, mask: jint) -> jboolean,
+                fn = super::hid::save_subscriptions,
+            };
+            #[allow(deprecated)]
+            let transition_hid = native_method! {
+                static = true,
+                name = "systemHidTransition",
+                sig = (state: jint, event: jint) -> jint,
+                fn = super::hid::system_hid_transition,
+            };
+            unsafe {
+                env.register_native_methods(
+                    &hid_peripheral_class,
+                    &[load_hid, save_hid, transition_hid],
+                )?;
+            }
+        }
         // jni-macros 0.22.4 expands native_method! to AtomicBool::fetch_update, deprecated
         // since Rust 1.99 (jni-rs/jni-rs#846).
         #[allow(deprecated)]

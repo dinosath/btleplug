@@ -1,4 +1,4 @@
-//! Android BLE HID-over-GATT peripheral support.
+//! Android Bluetooth HID peripheral support (system HID and BLE GATT).
 //!
 //! This exposes the Android GATT-server implementation bundled with btleplug.
 //! It is intentionally Android-only: btleplug's existing cross-platform API is
@@ -13,7 +13,7 @@ use jni::{
 };
 use std::{fmt, sync::Arc};
 
-/// A Bluetooth LE HID-over-GATT mouse and keyboard peripheral on Android.
+/// A Bluetooth LE HID-over-GATT mouse, keyboard, and gamepad peripheral on Android 9+ (API 28).
 ///
 /// The Android host must grant `BLUETOOTH_CONNECT` and `BLUETOOTH_ADVERTISE`
 /// permissions on Android 12 (API 31) and newer. The device must support BLE
@@ -130,6 +130,23 @@ impl BleHidPeripheral {
         })
     }
 
+    /// Send a seven-byte gamepad report (16 buttons, hat switch, and four axes).
+    pub fn send_gamepad_report(&self, report: [u8; 7]) -> Result<bool> {
+        jvm()?.attach_current_thread(|env| {
+            let array = env.new_byte_array(report.len())?;
+            let bytes: Vec<_> = report.into_iter().map(|byte| byte as i8).collect();
+            array.set_region(env, 0, &bytes)?;
+            Ok(env
+                .call_method(
+                    self.internal.as_obj(),
+                    jni_str!("sendGamepadReport"),
+                    jni_sig!("([B)Z"),
+                    &[(&array).into()],
+                )?
+                .z()?)
+        })
+    }
+
     /// Return the current advertising/connection state reported by Android.
     pub fn status(&self) -> Result<String> {
         jvm()?.attach_current_thread(|env| {
@@ -143,6 +160,20 @@ impl BleHidPeripheral {
                 .l()?;
             let value = env.cast_local::<JString>(value)?;
             Ok(value.try_to_string(env)?)
+        })
+    }
+
+    /// Return subscribed report bits for the first connected host (mouse=1, keyboard=2, gamepad=4).
+    pub fn connected_host_report_mask(&self) -> Result<u8> {
+        jvm()?.attach_current_thread(|env| {
+            Ok(env
+                .call_method(
+                    self.internal.as_obj(),
+                    jni_str!("getConnectedReportMask"),
+                    jni_sig!("()I"),
+                    &[],
+                )?
+                .i()? as u8)
         })
     }
 
@@ -164,4 +195,112 @@ impl BleHidPeripheral {
             Ok(Some(value.try_to_string(env)?))
         })
     }
+}
+
+/// Android system Bluetooth HID profile (API 28+). Uses the existing adapter
+/// identity instead of a separate BLE advertiser. Android owns report routing.
+/// Requires BLUETOOTH_CONNECT on Android 12+. Keep the application in the foreground.
+/// Pair using the system Bluetooth settings. Previously cached BLE identities are
+/// separate host records; this profile cannot remove them from a remote host.
+#[derive(Clone, Debug)]
+pub struct HidPeripheral(BleHidPeripheral);
+
+impl HidPeripheral {
+    /// # Safety
+    /// Same context lifetime and thread requirements as `BleHidPeripheral::new_from_raw_context`.
+    pub unsafe fn new_from_raw_context(
+        context: jni::sys::jobject,
+        device_name: &str,
+    ) -> Result<Self> {
+        Ok(Self(unsafe {
+            BleHidPeripheral::new_from_raw_context(context, device_name)?
+        }))
+    }
+    pub fn start(&self) -> Result<bool> {
+        jvm()?.attach_current_thread(|env| {
+            Ok(env
+                .call_method(
+                    self.0.internal.as_obj(),
+                    jni_str!("startSystemHid"),
+                    jni_sig!("()Z"),
+                    &[],
+                )?
+                .z()?)
+        })
+    }
+    pub fn stop(&self) -> Result<()> {
+        self.0.stop()
+    }
+    pub fn status(&self) -> Result<String> {
+        self.0.status()
+    }
+    pub fn connected_host_name(&self) -> Result<Option<String>> {
+        self.0.connected_host_name()
+    }
+    pub fn connected_host_report_mask(&self) -> Result<u8> {
+        self.0.connected_host_report_mask()
+    }
+    pub fn send_mouse_report(&self, buttons: i8, dx: i8, dy: i8, wheel: i8) -> Result<bool> {
+        self.0.send_mouse_report(buttons, dx, dy, wheel)
+    }
+    pub fn send_keyboard_report(&self, report: [u8; 8]) -> Result<bool> {
+        self.0.send_keyboard_report(report)
+    }
+    pub fn send_gamepad_report(&self, report: [u8; 7]) -> Result<bool> {
+        self.0.send_gamepad_report(report)
+    }
+}
+
+// Native callbacks use Rust storage so subscription lifecycle policy stays outside Java.
+pub(super) fn load_subscriptions<'local>(
+    env: &mut Env<'local>,
+    _class: jni::objects::JClass<'local>,
+    root: JString<'local>,
+    address: JString<'local>,
+    bonded: jni::sys::jboolean,
+) -> jni::errors::Result<jni::sys::jint> {
+    let root = root.try_to_string(env)?;
+    let address = address.try_to_string(env)?;
+    Ok(
+        match crate::hid_subscriptions::load(std::path::Path::new(&root), &address, bonded) {
+            Ok(mask) => i32::from(mask),
+            Err(error) => {
+                log::warn!("Could not restore HID subscriptions: {error}");
+                0
+            }
+        },
+    )
+}
+
+pub(super) fn save_subscriptions<'local>(
+    env: &mut Env<'local>,
+    _class: jni::objects::JClass<'local>,
+    root: JString<'local>,
+    address: JString<'local>,
+    bonded: jni::sys::jboolean,
+    mask: jni::sys::jint,
+) -> jni::errors::Result<jni::sys::jboolean> {
+    let root = root.try_to_string(env)?;
+    let address = address.try_to_string(env)?;
+    let Ok(mask) = u8::try_from(mask) else {
+        return Ok(false);
+    };
+    Ok(
+        match crate::hid_subscriptions::save(std::path::Path::new(&root), &address, bonded, mask) {
+            Ok(()) => true,
+            Err(error) => {
+                log::warn!("Could not persist HID subscriptions: {error}");
+                false
+            }
+        },
+    )
+}
+
+pub(super) fn system_hid_transition<'local>(
+    _env: &mut Env<'local>,
+    _class: jni::objects::JClass<'local>,
+    state: jni::sys::jint,
+    event: jni::sys::jint,
+) -> jni::errors::Result<jni::sys::jint> {
+    Ok(crate::hid_lifecycle::transition(state, event))
 }

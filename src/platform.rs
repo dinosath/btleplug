@@ -10,7 +10,7 @@ pub use crate::corebluetooth::{
     adapter::Adapter, manager::Manager, peripheral::Peripheral, peripheral::PeripheralId,
 };
 #[cfg(target_os = "android")]
-pub use crate::droidplug::hid::BleHidPeripheral;
+pub use crate::droidplug::hid::{BleHidPeripheral, HidPeripheral};
 #[cfg(target_os = "android")]
 pub use crate::droidplug::{
     adapter::Adapter, init, init_from_raw_env, manager::Manager, peripheral::Peripheral,

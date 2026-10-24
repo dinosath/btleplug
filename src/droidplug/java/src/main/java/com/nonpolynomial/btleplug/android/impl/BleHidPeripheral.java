@@ -10,6 +10,10 @@ import android.bluetooth.BluetoothGattServer;
 import android.bluetooth.BluetoothGattServerCallback;
 import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothManager;
+import android.bluetooth.BluetoothProfile;
+import android.bluetooth.BluetoothHidDevice;
+import android.bluetooth.BluetoothHidDeviceAppSdpSettings;
+import android.content.Intent;
 import android.bluetooth.BluetoothStatusCodes;
 import android.bluetooth.le.AdvertiseCallback;
 import android.bluetooth.le.AdvertiseData;
@@ -31,15 +35,17 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
-/** Minimal Bluetooth HID over GATT (HOGP) peripheral for mouse and keyboard input. */
+/** Minimal Bluetooth HID over GATT (HOGP) peripheral for mouse, keyboard, and gamepad input. */
 @SuppressWarnings({"unused", "deprecation"}) // GATT compatibility APIs support the configured minimum Android version.
-public final class BleHidPeripheral {
+public final class BleHidPeripheral extends BluetoothHidDevice.Callback
+        implements BluetoothProfile.ServiceListener {
     private static final String LOG_TAG = "OpenWASD-HID";
     private static final UUID HID_SERVICE = uuid(0x1812);
     private static final UUID DEVICE_INFORMATION_SERVICE = uuid(0x180A);
     private static final UUID BATTERY_SERVICE = uuid(0x180F);
     private static final UUID MANUFACTURER_NAME = uuid(0x2A29);
     private static final UUID MODEL_NUMBER = uuid(0x2A24);
+    private static final UUID PNP_ID = uuid(0x2A50);
     private static final UUID BATTERY_LEVEL = uuid(0x2A19);
     private static final UUID HID_INFORMATION = uuid(0x2A4A);
     private static final UUID REPORT_MAP = uuid(0x2A4B);
@@ -63,8 +69,172 @@ public final class BleHidPeripheral {
             0x15, 0x00, 0x25, 0x01, 0x75, 0x01, (byte) 0x95, 0x08, (byte) 0x81, 0x02,
             (byte) 0x95, 0x01, 0x75, 0x08, (byte) 0x81, 0x01,
             (byte) 0x95, 0x06, 0x75, 0x08, 0x15, 0x00, 0x25, 0x65,
-            0x05, 0x07, 0x19, 0x00, 0x29, 0x65, (byte) 0x81, 0x00, (byte) 0xC0
+            0x05, 0x07, 0x19, 0x00, 0x29, 0x65, (byte) 0x81, 0x00, (byte) 0xC0,
+            0x05, 0x01, 0x09, 0x05, (byte) 0xA1, 0x01,
+            (byte) 0x85, 0x03, 0x05, 0x09, 0x19, 0x01, 0x29, 0x10,
+            0x15, 0x00, 0x25, 0x01, 0x75, 0x01, (byte) 0x95, 0x10, (byte) 0x81, 0x02,
+            0x05, 0x01, 0x09, 0x39, 0x15, 0x00, 0x25, 0x07, 0x35, 0x00, 0x46, 0x3B, 0x01,
+            0x65, 0x14, 0x75, 0x04, (byte) 0x95, 0x01, (byte) 0x81, 0x42,
+            0x75, 0x04, (byte) 0x95, 0x01, (byte) 0x81, 0x03,
+            0x09, 0x30, 0x09, 0x31, 0x09, 0x33, 0x09, 0x34,
+            0x15, (byte) 0x81, 0x25, 0x7F, 0x75, 0x08, (byte) 0x95, 0x04, (byte) 0x81, 0x02,
+            (byte) 0xC0
     };
+    private static native int loadSubscriptions(String root, String address, boolean bonded);
+    private static native boolean saveSubscriptions(String root, String address, boolean bonded, int mask);
+    private BluetoothHidDevice systemDevice;
+    private BluetoothDevice systemHost;
+    // Lifecycle policy is implemented and regression tested in Rust (hid_lifecycle.rs).
+    private static native int systemHidTransition(int state, int event);
+    private int systemState; // stopped=0, waiting proxy=1, registering=2, ready=3, suspended=4
+    private boolean discoverabilityRequested;
+    private BluetoothAdapter systemAdapter;
+
+    /** Android's native HID profile shares the adapter identity; no private BLE advertiser. */
+    @SuppressLint("MissingPermission")
+    public synchronized boolean startSystemHid() {
+        if (systemState != 0) {
+            if (systemState == 4 && systemDevice != null) {
+                systemState = systemHidTransition(systemState, 4);
+                registerSystemApp();
+            }
+            return true;
+        }
+        if (Build.VERSION.SDK_INT < 28) {
+            status = "Android system HID requires Android 9 or newer";
+            return false;
+        }
+        stop();
+        systemAdapter = ((BluetoothManager) context.getSystemService(Context.BLUETOOTH_SERVICE)).getAdapter();
+        if (systemAdapter == null || !systemAdapter.isEnabled()) {
+            status = "Bluetooth is unavailable or turned off";
+            return false;
+        }
+        systemState = systemHidTransition(systemState, 0);
+        status = "Registering system HID service";
+        Log.i(LOG_TAG, "System HID session starting; no BLE advertiser");
+        if (!systemAdapter.getProfileProxy(context, this, BluetoothProfile.HID_DEVICE)) {
+            systemState = systemHidTransition(systemState, 5);
+            status = "Android system HID profile is unavailable";
+            return false;
+        }
+        return true;
+    }
+
+    @Override @SuppressLint("MissingPermission")
+    public synchronized void onServiceConnected(int profile, BluetoothProfile proxy) {
+        if (profile != BluetoothProfile.HID_DEVICE) return;
+        Log.d(LOG_TAG, "System HID proxy ready; state=" + systemState);
+        if (systemState == 0) {
+            if (systemAdapter != null) systemAdapter.closeProfileProxy(profile, proxy);
+            return;
+        }
+        if (systemState != 1) return; // Ignore repeated proxy callbacks.
+        systemDevice = (BluetoothHidDevice) proxy;
+        systemState = systemHidTransition(systemState, 1);
+        registerSystemApp();
+    }
+
+    @SuppressLint("MissingPermission")
+    private void registerSystemApp() {
+        status = "Registering system HID service";
+        BluetoothHidDeviceAppSdpSettings settings = new BluetoothHidDeviceAppSdpSettings(
+                deviceName, "OpenWASD gamepad, mouse, and keyboard", "OpenWASD",
+                BluetoothHidDevice.SUBCLASS1_COMBO, REPORT_MAP_VALUE);
+        boolean accepted = systemDevice.registerApp(settings, null, null, context.getMainExecutor(), this);
+        Log.d(LOG_TAG, "System HID registration requested; state=" + systemState + " accepted=" + accepted);
+        if (!accepted) {
+            systemState = systemHidTransition(systemState, 3);
+            status = "Android rejected system HID registration";
+        }
+    }
+
+    @Override
+    public synchronized void onServiceDisconnected(int profile) {
+        if (profile != BluetoothProfile.HID_DEVICE) return;
+        systemDevice = null;
+        systemHost = null;
+        systemState = systemHidTransition(systemState, 5);
+        status = "Android system HID service disconnected";
+        Log.i(LOG_TAG, "System HID service disconnected");
+    }
+
+    @Override @SuppressLint("MissingPermission")
+    public synchronized void onAppStatusChanged(BluetoothDevice pluggedDevice, boolean registered) {
+        Log.d(LOG_TAG, "System HID registration callback; state=" + systemState + " registered=" + registered);
+        if (systemState == 0) return;
+        if (registered && systemState != 2 && systemState != 4) return;
+        systemState = systemHidTransition(systemState, registered ? 2 : 3);
+        if (!registered) {
+            systemHost = null;
+            Log.i(LOG_TAG, "System HID registration stopped");
+            status = "Android system HID registration stopped; keep OpenWASD in the foreground";
+            return;
+        }
+        status = "System HID ready as " + systemAdapter.getName();
+        Log.i(LOG_TAG, "System HID registered; identity=" + systemAdapter.getName());
+        boolean hasComputerBond = pluggedDevice != null;
+        if (pluggedDevice != null) {
+            systemDevice.connect(pluggedDevice);
+        } else {
+            // Reconnect the existing computer bond. Do not connect to unrelated
+            // paired controllers/headsets or create another device identity.
+            for (BluetoothDevice device : systemAdapter.getBondedDevices()) {
+                android.bluetooth.BluetoothClass klass = device.getBluetoothClass();
+                if (klass != null && klass.getMajorDeviceClass() == android.bluetooth.BluetoothClass.Device.Major.COMPUTER) {
+                    hasComputerBond = true;
+                    Log.i(LOG_TAG, "Connecting system HID to bonded computer " + safeName(device));
+                    systemDevice.connect(device);
+                }
+            }
+        }
+        if (!hasComputerBond && !discoverabilityRequested) {
+            discoverabilityRequested = true;
+            Intent discoverable = new Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE);
+            discoverable.putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 120);
+            discoverable.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            context.startActivity(discoverable);
+        }
+    }
+
+    @Override @SuppressLint("MissingPermission")
+    public synchronized void onConnectionStateChanged(BluetoothDevice device, int newState) {
+        if (systemState == 0) return;
+        Log.i(LOG_TAG, "System HID host connection changed; host=" + safeName(device) + " state=" + newState);
+        if (newState == BluetoothProfile.STATE_CONNECTED) {
+            systemHost = device;
+            status = "Connected to " + safeName(device) + "; system HID mouse and keyboard ready";
+        } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+            if (systemHost != null && systemHost.equals(device)) systemHost = null;
+            status = "System HID ready as " + systemAdapter.getName();
+        }
+    }
+
+    @Override @SuppressLint("MissingPermission")
+    public synchronized void onGetReport(BluetoothDevice device, byte type, byte id, int bufferSize) {
+        if (systemDevice == null) return;
+        if (type == BluetoothHidDevice.REPORT_TYPE_INPUT && (id == 1 || id == 2)) {
+            systemDevice.replyReport(device, type, id, id == 1 ? new byte[4] : new byte[8]);
+        } else {
+            systemDevice.reportError(device, BluetoothHidDevice.ERROR_RSP_UNSUPPORTED_REQ);
+        }
+    }
+
+    @Override
+    public synchronized void onVirtualCableUnplug(BluetoothDevice device) {
+        if (device.equals(systemHost)) systemHost = null;
+        status = "System HID host disconnected";
+    }
+
+    @SuppressLint("MissingPermission")
+    private synchronized boolean sendSystemReport(int reportId, byte[] report) {
+        if (systemState != 3 || systemDevice == null || systemHost == null) return false;
+        boolean sent = systemDevice.sendReport(systemHost, reportId, report);
+        if (sent) Log.d(LOG_TAG, "HID system report queued; host=" + safeName(systemHost)
+                + " reportId=" + reportId + " payload=" + bytesToHex(report));
+        return sent;
+    }
+
     private final Context context;
     private final String deviceName;
     private final Map<String, BluetoothDevice> connectedHosts = new HashMap<>();
@@ -75,6 +245,7 @@ public final class BleHidPeripheral {
     private BluetoothLeAdvertiser advertiser;
     private BluetoothGattCharacteristic mouseReport;
     private BluetoothGattCharacteristic keyboardReport;
+    private BluetoothGattCharacteristic gamepadReport;
     private AdvertiseCallback advertiseCallback;
     // Android's service-registration callbacks can race with host disconnect
     // callbacks. Keep one advertiser request in flight at a time.
@@ -92,7 +263,12 @@ public final class BleHidPeripheral {
 
     @SuppressLint("MissingPermission")
     public synchronized boolean start() {
+        if (systemState != 0) {
+            status = "System HID already owns this peripheral; stop it before starting BLE HID";
+            return false;
+        }
         if (server != null) return true;
+        Log.i(LOG_TAG, "BLE HID session starting");
         BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
         if (adapter == null || !adapter.isEnabled()) {
             status = "Bluetooth is unavailable or turned off";
@@ -141,7 +317,7 @@ public final class BleHidPeripheral {
 
     @SuppressLint("MissingPermission")
     private synchronized void beginAdvertising() {
-        if (!hidServiceReady || server == null || advertiser == null) {
+        if (systemState != 0 || !hidServiceReady || server == null || advertiser == null || !connectedHosts.isEmpty()) {
             Log.i(LOG_TAG, "Skipping BLE HID advertising until the HID service is ready");
             return;
         }
@@ -231,8 +407,10 @@ public final class BleHidPeripheral {
 
         mouseReport = inputReport(1);
         keyboardReport = inputReport(2);
+        gamepadReport = inputReport(3);
         service.addCharacteristic(mouseReport);
         service.addCharacteristic(keyboardReport);
+        service.addCharacteristic(gamepadReport);
         return service;
     }
 
@@ -243,6 +421,10 @@ public final class BleHidPeripheral {
                 MANUFACTURER_NAME, "OpenWASD".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
         service.addCharacteristic(publicReadCharacteristic(
                 MODEL_NUMBER, "BLE HID Controller".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        // HOGP requires PnP ID. 0xFFFF is the development/default vendor,
+        // not an assigned third-party vendor identity.
+        service.addCharacteristic(publicReadCharacteristic(PNP_ID,
+                new byte[] {0x01, (byte) 0xFF, (byte) 0xFF, 0x01, 0x00, 0x01, 0x00}));
         return service;
     }
 
@@ -274,7 +456,8 @@ public final class BleHidPeripheral {
                 REPORT,
                 BluetoothGattCharacteristic.PROPERTY_READ | BluetoothGattCharacteristic.PROPERTY_NOTIFY,
                 BluetoothGattCharacteristic.PERMISSION_READ_ENCRYPTED);
-        characteristic.setValue(reportId == 1 ? new byte[] {0, 0, 0, 0} : new byte[8]);
+        characteristic.setValue(reportId == 1 ? new byte[] {0, 0, 0, 0}
+                : reportId == 3 ? new byte[7] : new byte[8]);
         BluetoothGattDescriptor reference = new BluetoothGattDescriptor(
                 REPORT_REFERENCE,
                 BluetoothGattDescriptor.PERMISSION_READ_ENCRYPTED);
@@ -341,7 +524,16 @@ public final class BleHidPeripheral {
                     + " address=" + address + " status=" + statusCode + " state=" + newState);
             synchronized (BleHidPeripheral.this) {
                 if (newState == BluetoothGatt.STATE_CONNECTED) {
+                    if (statusCode != BluetoothGatt.GATT_SUCCESS) return;
                     connectedHosts.put(address, device);
+                    int mask = loadSubscriptions(context.getFilesDir().getAbsolutePath(), address,
+                            device.getBondState() == BluetoothDevice.BOND_BONDED);
+                    Set<Integer> restored = new HashSet<>();
+                    if ((mask & 1) != 0) restored.add(1);
+                    if ((mask & 2) != 0) restored.add(2);
+                    reportSubscriptions.put(address, restored);
+                    Log.i(LOG_TAG, "HID report subscriptions restored; host=" + safeName(device)
+                            + " mask=" + mask);
                     if (!hidServiceReady) {
                         // Bonded hosts can reconnect as soon as Android opens
                         // the GATT server, a few milliseconds before its
@@ -406,7 +598,16 @@ public final class BleHidPeripheral {
 
         @Override public void onDescriptorReadRequest(BluetoothDevice device, int requestId,
                 int offset, BluetoothGattDescriptor descriptor) {
-            byte[] value = descriptor.getValue();
+            byte[] value;
+            synchronized (BleHidPeripheral.this) {
+                if (CLIENT_CONFIGURATION.equals(descriptor.getUuid())) {
+                    boolean enabled = reportSubscriptions.getOrDefault(device.getAddress(), new HashSet<>())
+                            .contains(reportId(descriptor.getCharacteristic()));
+                    value = new byte[] {(byte) (enabled ? 1 : 0), 0};
+                } else {
+                    value = descriptor.getValue();
+                }
+            }
             if (value == null) value = new byte[] {0, 0};
             Log.i(LOG_TAG, "GATT descriptor read; host=" + safeName(device)
                     + " uuid=" + descriptor.getUuid() + " offset=" + offset
@@ -428,8 +629,12 @@ public final class BleHidPeripheral {
                 BluetoothGattDescriptor descriptor, boolean preparedWrite,
                 boolean responseNeeded, int offset, byte[] value) {
             if (CLIENT_CONFIGURATION.equals(descriptor.getUuid())) {
-                descriptor.setValue(value);
-                BluetoothGattCharacteristic parent = descriptor.getCharacteristic();
+                if (preparedWrite || offset != 0 || value == null || value.length != 2
+                        || value[1] != 0 || (value[0] != 0 && value[0] != 1)) {
+                    if (responseNeeded) server.sendResponse(device, requestId,
+                            BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED, offset, null);
+                    return;
+                }
                 int reportId = reportId(descriptor.getCharacteristic());
                 boolean enabled = value != null && value.length >= 2 && (value[0] & 0x01) != 0;
                 synchronized (BleHidPeripheral.this) {
@@ -442,6 +647,14 @@ public final class BleHidPeripheral {
                         subscribed.add(reportId);
                     } else if (reportId != 0) {
                         subscribed.remove(reportId);
+                    }
+                    int mask = (subscribed.contains(1) ? 1 : 0) | (subscribed.contains(2) ? 2 : 0);
+                    if (!saveSubscriptions(context.getFilesDir().getAbsolutePath(), device.getAddress(),
+                            device.getBondState() == BluetoothDevice.BOND_BONDED, mask)) {
+                        if (enabled) subscribed.remove(reportId); else subscribed.add(reportId);
+                        if (responseNeeded) server.sendResponse(device, requestId,
+                                BluetoothGatt.GATT_FAILURE, offset, null);
+                        return;
                     }
                     refreshConnectionStatus();
                 }
@@ -463,17 +676,23 @@ public final class BleHidPeripheral {
 
     @SuppressLint("MissingPermission")
     public boolean sendMouseReport(byte buttons, byte dx, byte dy, byte wheel) {
-        return notifyHosts(mouseReport, new byte[] {buttons, dx, dy, wheel});
+        byte[] report = new byte[] {buttons, dx, dy, wheel};
+        return systemState != 0 ? sendSystemReport(1, report) : notifyHosts(mouseReport, report);
     }
 
     public boolean sendKeyboardReport(byte[] report) {
         if (report == null || report.length != 8) return false;
-        return notifyHosts(keyboardReport, report.clone());
+        return systemState != 0 ? sendSystemReport(2, report.clone()) : notifyHosts(keyboardReport, report.clone());
+    }
+
+    public boolean sendGamepadReport(byte[] report) {
+        if (report == null || report.length != 7) return false;
+        return systemState != 0 ? sendSystemReport(3, report.clone()) : notifyHosts(gamepadReport, report.clone());
     }
 
     @SuppressLint("MissingPermission")
     private synchronized boolean notifyHosts(BluetoothGattCharacteristic characteristic, byte[] report) {
-        if (server == null || characteristic == null || connectedHosts.isEmpty()) return false;
+        if (!hidServiceReady || server == null || characteristic == null || connectedHosts.isEmpty()) return false;
         boolean sent = false;
         int reportId = reportId(characteristic);
         for (Map.Entry<String, BluetoothDevice> entry : connectedHosts.entrySet()) {
@@ -514,6 +733,18 @@ public final class BleHidPeripheral {
 
     @SuppressLint("MissingPermission")
     public synchronized void stop() {
+        systemState = systemHidTransition(systemState, 5);
+        if (systemDevice != null) {
+            if (systemHost != null) {
+                systemDevice.sendReport(systemHost, 1, new byte[4]);
+                systemDevice.sendReport(systemHost, 2, new byte[8]);
+                systemDevice.disconnect(systemHost);
+            }
+            systemDevice.unregisterApp();
+            if (systemAdapter != null) systemAdapter.closeProfileProxy(BluetoothProfile.HID_DEVICE, systemDevice);
+        }
+        systemDevice = null;
+        systemHost = null;
         stopAdvertising();
         if (server != null) server.close();
         server = null;
@@ -525,6 +756,7 @@ public final class BleHidPeripheral {
         startupServices.clear();
         nextStartupService = 0;
         status = "Stopped";
+        Log.i(LOG_TAG, "BLE HID session stopped");
     }
 
     @SuppressLint("MissingPermission")
@@ -540,6 +772,15 @@ public final class BleHidPeripheral {
     }
 
     public String getStatus() { return status; }
+
+    public synchronized int getConnectedReportMask() {
+        if (systemState != 0) return systemState == 3 && systemHost != null ? 7 : 0;
+        if (!hidServiceReady || connectedHosts.isEmpty()) return 0;
+        String host = connectedHosts.keySet().iterator().next();
+        Set<Integer> reports = reportSubscriptions.getOrDefault(host, new HashSet<>());
+        return (reports.contains(1) ? 1 : 0) | (reports.contains(2) ? 2 : 0)
+                | (reports.contains(3) ? 4 : 0);
+    }
 
     private void refreshConnectionStatus() {
         if (connectedHosts.isEmpty()) {
@@ -571,6 +812,7 @@ public final class BleHidPeripheral {
 
     @SuppressLint("MissingPermission")
     public synchronized String getConnectedDeviceName() {
+        if (systemState != 0) return systemHost == null ? null : safeName(systemHost);
         if (connectedHosts.isEmpty()) return null;
         return safeName(connectedHosts.values().iterator().next());
     }

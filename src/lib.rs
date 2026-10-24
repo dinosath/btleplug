@@ -100,6 +100,10 @@ mod common;
 mod corebluetooth;
 #[cfg(target_os = "android")]
 mod droidplug;
+#[cfg(any(target_os = "android", test))]
+mod hid_lifecycle;
+#[cfg(any(target_os = "android", test))]
+mod hid_subscriptions;
 #[cfg(all(not(target_os = "android"), feature = "jni-host-tests"))]
 #[allow(dead_code)]
 mod droidplug {
