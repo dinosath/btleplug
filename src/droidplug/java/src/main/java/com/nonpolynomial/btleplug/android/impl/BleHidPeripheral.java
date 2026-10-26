@@ -84,6 +84,9 @@ public final class BleHidPeripheral extends BluetoothHidDevice.Callback
     private static native boolean saveSubscriptions(String root, String address, boolean bonded, int mask);
     private BluetoothHidDevice systemDevice;
     private BluetoothDevice systemHost;
+    private BluetoothDevice connectingHost;
+    private final List<BluetoothDevice> systemHostCandidates = new ArrayList<>();
+    private int nextSystemHostCandidate;
     // Lifecycle policy is implemented and regression tested in Rust (hid_lifecycle.rs).
     private static native int systemHidTransition(int state, int event);
     private int systemState; // stopped=0, waiting proxy=1, registering=2, ready=3, suspended=4
@@ -154,6 +157,9 @@ public final class BleHidPeripheral extends BluetoothHidDevice.Callback
         if (profile != BluetoothProfile.HID_DEVICE) return;
         systemDevice = null;
         systemHost = null;
+        connectingHost = null;
+        systemHostCandidates.clear();
+        nextSystemHostCandidate = 0;
         systemState = systemHidTransition(systemState, 5);
         status = "Android system HID service disconnected";
         Log.i(LOG_TAG, "System HID service disconnected");
@@ -161,34 +167,70 @@ public final class BleHidPeripheral extends BluetoothHidDevice.Callback
 
     @Override @SuppressLint("MissingPermission")
     public synchronized void onAppStatusChanged(BluetoothDevice pluggedDevice, boolean registered) {
-        Log.d(LOG_TAG, "System HID registration callback; state=" + systemState + " registered=" + registered);
+        Log.d(LOG_TAG, "System HID registration callback; state=" + systemState + " registered=" + registered
+                + " pluggedHost=" + safeName(pluggedDevice)
+                + " profileState=" + (pluggedDevice == null || systemDevice == null
+                        ? "none" : systemDevice.getConnectionState(pluggedDevice)));
         if (systemState == 0) return;
         if (registered && systemState != 2 && systemState != 4) return;
         systemState = systemHidTransition(systemState, registered ? 2 : 3);
         if (!registered) {
             systemHost = null;
+            connectingHost = null;
+            systemHostCandidates.clear();
+            nextSystemHostCandidate = 0;
             Log.i(LOG_TAG, "System HID registration stopped");
             status = "Android system HID registration stopped; keep OpenWASD in the foreground";
             return;
         }
         status = "System HID ready as " + systemAdapter.getName();
         Log.i(LOG_TAG, "System HID registered; identity=" + systemAdapter.getName());
-        boolean hasComputerBond = pluggedDevice != null;
-        if (pluggedDevice != null) {
-            systemDevice.connect(pluggedDevice);
-        } else {
-            // Reconnect the existing computer bond. Do not connect to unrelated
-            // paired controllers/headsets or create another device identity.
-            for (BluetoothDevice device : systemAdapter.getBondedDevices()) {
-                android.bluetooth.BluetoothClass klass = device.getBluetoothClass();
-                if (klass != null && klass.getMajorDeviceClass() == android.bluetooth.BluetoothClass.Device.Major.COMPUTER) {
-                    hasComputerBond = true;
-                    Log.i(LOG_TAG, "Connecting system HID to bonded computer " + safeName(device));
-                    systemDevice.connect(device);
-                }
+        if (pluggedDevice != null
+                && systemDevice.getConnectionState(pluggedDevice) == BluetoothProfile.STATE_CONNECTED) {
+            systemHost = pluggedDevice;
+            status = "Connected to " + safeName(pluggedDevice) + "; system HID mouse and keyboard ready";
+            Log.i(LOG_TAG, "Keeping active HID virtual cable; host=" + safeName(pluggedDevice));
+            return;
+        }
+        if (pluggedDevice != null
+                && systemDevice.getConnectionState(pluggedDevice) == BluetoothProfile.STATE_CONNECTING) {
+            Log.i(LOG_TAG, "Canceling reconnect to stale HID host=" + safeName(pluggedDevice));
+            systemDevice.disconnect(pluggedDevice);
+        }
+
+        systemHostCandidates.clear();
+        nextSystemHostCandidate = 0;
+        Set<String> activeComputerAddresses = activeComputerProfileAddresses();
+        List<BluetoothDevice> otherComputerBonds = new ArrayList<>();
+        for (BluetoothDevice device : systemAdapter.getBondedDevices()) {
+            android.bluetooth.BluetoothClass klass = device.getBluetoothClass();
+            if (klass == null || klass.getMajorDeviceClass() != android.bluetooth.BluetoothClass.Device.Major.COMPUTER) {
+                continue;
+            }
+            if (activeComputerAddresses.contains(device.getAddress().toUpperCase(java.util.Locale.ROOT))) {
+                systemHostCandidates.add(device);
+            } else if (pluggedDevice == null || !pluggedDevice.equals(device)) {
+                otherComputerBonds.add(device);
             }
         }
-        if (!hasComputerBond && !discoverabilityRequested) {
+        if (systemHostCandidates.isEmpty() && otherComputerBonds.size() == 1) {
+            // Auto-connect only when there is one unambiguous computer bond.
+            // A stale pluggedDevice from a previous registration is not evidence
+            // that the host is connected or should take priority.
+            systemHostCandidates.addAll(otherComputerBonds);
+        }
+        for (BluetoothDevice candidate : systemHostCandidates) {
+            Log.i(LOG_TAG, "System HID connection candidate=" + safeName(candidate)
+                    + " activeOtherProfile="
+                    + activeComputerAddresses.contains(candidate.getAddress().toUpperCase(java.util.Locale.ROOT)));
+        }
+        if (systemHostCandidates.isEmpty()) {
+            Log.w(LOG_TAG, "No unambiguous paired computer host is available for system HID");
+            status = "System HID is ready; select or connect the target computer in Bluetooth settings";
+        } else {
+            connectNextSystemHost();
+        }
+        if (systemHostCandidates.isEmpty() && !discoverabilityRequested) {
             discoverabilityRequested = true;
             Intent discoverable = new Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE);
             discoverable.putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 120);
@@ -203,11 +245,69 @@ public final class BleHidPeripheral extends BluetoothHidDevice.Callback
         Log.i(LOG_TAG, "System HID host connection changed; host=" + safeName(device) + " state=" + newState);
         if (newState == BluetoothProfile.STATE_CONNECTED) {
             systemHost = device;
+            connectingHost = null;
+            systemHostCandidates.clear();
             status = "Connected to " + safeName(device) + "; system HID mouse and keyboard ready";
+        } else if (newState == BluetoothProfile.STATE_CONNECTING) {
+            connectingHost = device;
+            status = "Connecting system HID to " + safeName(device);
         } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+            boolean failedCandidate = connectingHost != null && connectingHost.equals(device);
             if (systemHost != null && systemHost.equals(device)) systemHost = null;
+            if (failedCandidate) connectingHost = null;
             status = "System HID ready as " + systemAdapter.getName();
+            if (failedCandidate && systemState == 3) connectNextSystemHost();
         }
+    }
+
+    @SuppressLint("MissingPermission")
+    private Set<String> activeComputerProfileAddresses() {
+        Set<String> addresses = new HashSet<>();
+        BluetoothManager manager = (BluetoothManager) context.getSystemService(Context.BLUETOOTH_SERVICE);
+        for (int profile : new int[] {BluetoothProfile.HEADSET, BluetoothProfile.A2DP}) {
+            try {
+                for (BluetoothDevice device : manager.getConnectedDevices(profile)) {
+                    android.bluetooth.BluetoothClass klass = device.getBluetoothClass();
+                    if (klass != null && klass.getMajorDeviceClass() == android.bluetooth.BluetoothClass.Device.Major.COMPUTER) {
+                        addresses.add(device.getAddress().toUpperCase(java.util.Locale.ROOT));
+                    }
+                }
+            } catch (RuntimeException error) {
+                Log.w(LOG_TAG, "Could not inspect active Bluetooth profile " + profile, error);
+            }
+        }
+        return addresses;
+    }
+
+    @SuppressLint("MissingPermission")
+    private synchronized void connectNextSystemHost() {
+        if (systemState != 3 || systemDevice == null || systemHost != null || connectingHost != null) return;
+        while (nextSystemHostCandidate < systemHostCandidates.size()) {
+            BluetoothDevice candidate = systemHostCandidates.get(nextSystemHostCandidate++);
+            int state = systemDevice.getConnectionState(candidate);
+            if (state == BluetoothProfile.STATE_CONNECTED) {
+                systemHost = candidate;
+                systemHostCandidates.clear();
+                status = "Connected to " + safeName(candidate) + "; system HID mouse and keyboard ready";
+                Log.i(LOG_TAG, "System HID host already connected=" + safeName(candidate));
+                return;
+            }
+            if (state == BluetoothProfile.STATE_CONNECTING) {
+                connectingHost = candidate;
+                Log.i(LOG_TAG, "System HID connection already in progress; host=" + safeName(candidate));
+                return;
+            }
+            boolean accepted = systemDevice.connect(candidate);
+            Log.i(LOG_TAG, "System HID connect requested; host=" + safeName(candidate)
+                    + " accepted=" + accepted + " previousState=" + state);
+            if (accepted) {
+                connectingHost = candidate;
+                status = "Connecting system HID to " + safeName(candidate);
+                return;
+            }
+        }
+        status = "System HID is ready, but no paired computer accepted the connection";
+        Log.w(LOG_TAG, status);
     }
 
     @Override @SuppressLint("MissingPermission")
@@ -745,6 +845,9 @@ public final class BleHidPeripheral extends BluetoothHidDevice.Callback
         }
         systemDevice = null;
         systemHost = null;
+        connectingHost = null;
+        systemHostCandidates.clear();
+        nextSystemHostCandidate = 0;
         stopAdvertising();
         if (server != null) server.close();
         server = null;
@@ -819,6 +922,7 @@ public final class BleHidPeripheral extends BluetoothHidDevice.Callback
 
     @SuppressLint("MissingPermission")
     private String safeName(BluetoothDevice device) {
+        if (device == null) return "none";
         try {
             String name = device.getName();
             return name == null || name.isEmpty() ? device.getAddress() : name;
