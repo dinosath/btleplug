@@ -200,16 +200,13 @@ public final class BleHidPeripheral extends BluetoothHidDevice.Callback
 
         systemHostCandidates.clear();
         nextSystemHostCandidate = 0;
-        Set<String> activeComputerAddresses = activeComputerProfileAddresses();
         List<BluetoothDevice> otherComputerBonds = new ArrayList<>();
         for (BluetoothDevice device : systemAdapter.getBondedDevices()) {
             android.bluetooth.BluetoothClass klass = device.getBluetoothClass();
             if (klass == null || klass.getMajorDeviceClass() != android.bluetooth.BluetoothClass.Device.Major.COMPUTER) {
                 continue;
             }
-            if (activeComputerAddresses.contains(device.getAddress().toUpperCase(java.util.Locale.ROOT))) {
-                systemHostCandidates.add(device);
-            } else if (pluggedDevice == null || !pluggedDevice.equals(device)) {
+            if (pluggedDevice == null || !pluggedDevice.equals(device)) {
                 otherComputerBonds.add(device);
             }
         }
@@ -220,9 +217,7 @@ public final class BleHidPeripheral extends BluetoothHidDevice.Callback
             systemHostCandidates.addAll(otherComputerBonds);
         }
         for (BluetoothDevice candidate : systemHostCandidates) {
-            Log.i(LOG_TAG, "System HID connection candidate=" + safeName(candidate)
-                    + " activeOtherProfile="
-                    + activeComputerAddresses.contains(candidate.getAddress().toUpperCase(java.util.Locale.ROOT)));
+            Log.i(LOG_TAG, "System HID connection candidate=" + safeName(candidate));
         }
         if (systemHostCandidates.isEmpty()) {
             Log.w(LOG_TAG, "No unambiguous paired computer host is available for system HID");
@@ -258,25 +253,6 @@ public final class BleHidPeripheral extends BluetoothHidDevice.Callback
             status = "System HID ready as " + systemAdapter.getName();
             if (failedCandidate && systemState == 3) connectNextSystemHost();
         }
-    }
-
-    @SuppressLint("MissingPermission")
-    private Set<String> activeComputerProfileAddresses() {
-        Set<String> addresses = new HashSet<>();
-        BluetoothManager manager = (BluetoothManager) context.getSystemService(Context.BLUETOOTH_SERVICE);
-        for (int profile : new int[] {BluetoothProfile.HEADSET, BluetoothProfile.A2DP}) {
-            try {
-                for (BluetoothDevice device : manager.getConnectedDevices(profile)) {
-                    android.bluetooth.BluetoothClass klass = device.getBluetoothClass();
-                    if (klass != null && klass.getMajorDeviceClass() == android.bluetooth.BluetoothClass.Device.Major.COMPUTER) {
-                        addresses.add(device.getAddress().toUpperCase(java.util.Locale.ROOT));
-                    }
-                }
-            } catch (RuntimeException error) {
-                Log.w(LOG_TAG, "Could not inspect active Bluetooth profile " + profile, error);
-            }
-        }
-        return addresses;
     }
 
     @SuppressLint("MissingPermission")
