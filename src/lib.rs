@@ -100,6 +100,11 @@ mod common;
 mod corebluetooth;
 #[cfg(target_os = "android")]
 mod droidplug;
+#[cfg(all(target_os = "android", feature = "dioxus-ffi"))]
+#[manganis::ffi("src/droidplug/java")]
+extern "Kotlin" {
+    pub type BtleplugAndroidSources;
+}
 #[cfg(any(target_os = "android", test))]
 mod hid_lifecycle;
 #[cfg(any(target_os = "android", test))]

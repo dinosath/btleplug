@@ -25,6 +25,7 @@ path = "src/lib.rs"
 [features]
 serde = ["uuid/serde", "serde_cr", "serde_bytes"]
 jni-host-tests = ["jni/invocation", "once_cell"]
+dioxus-ffi = ["dep:manganis"]
 
 [dependencies]
 async-trait = "0.1.92"
@@ -52,6 +53,7 @@ once_cell = { version = "1.21.4", optional = true }
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.22"
 once_cell = "1.21.4"
+manganis = { version = "0.7.10", optional = true }
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 objc2 = "0.6.4"
