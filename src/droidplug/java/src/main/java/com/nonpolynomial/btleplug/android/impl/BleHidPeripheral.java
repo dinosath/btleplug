@@ -147,8 +147,11 @@ public final class BleHidPeripheral extends BluetoothHidDevice.Callback
         boolean accepted = systemDevice.registerApp(settings, null, null, context.getMainExecutor(), this);
         Log.d(LOG_TAG, "System HID registration requested; state=" + systemState + " accepted=" + accepted);
         if (!accepted) {
-            systemState = systemHidTransition(systemState, 3);
-            status = "Android rejected system HID registration";
+            // The immediate return value is not the app registration state.
+            // Android reports that state through onAppStatusChanged; some
+            // devices (including the RP5) return false before an async
+            // registered=true callback arrives.
+            Log.w(LOG_TAG, "System HID registration request returned false; waiting for callback");
         }
     }
 
